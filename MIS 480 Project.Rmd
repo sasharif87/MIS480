@@ -1,0 +1,327 @@
+---
+title: "MIS480 - Forecasting"
+author: "Shan Sharif"
+date: "2024-11-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(TSstudio)
+library(dplyr)
+library(ggplot2)
+library(TTR)
+library(forecast)
+library(plotly)
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(RColorBrewer)
+library(broom)
+
+Current_Employment_Statistics <- read_csv("Current Employment Statistics.csv")
+
+```
+
+```{r, Filter}
+# Filter relevant columns and focus on monthly data by excluding 'Year'
+data_filtered <- Current_Employment_Statistics %>%
+  select(periodyear, periodname, indtitle, empces) %>%
+  filter(!str_detect(periodname, "Year"))
+
+# Create a datetime column by combining `periodyear` and `periodname`
+data_filtered <- data_filtered %>%
+  mutate(date = as.Date(paste(periodyear, periodname, "01", sep = "-"), format = "%Y-%b-%d")) %>%
+  drop_na(date, empces)
+
+# Pivot to arrange occupations and their employment counts over time
+occupation_data_monthly <- data_filtered %>%
+  pivot_wider(names_from = indtitle, values_from = empces, values_fn = mean)
+
+# Plotting employment trends by occupation over time
+occupation_data_monthly %>%
+  gather(key = "occupation", value = "employment", -date) %>%
+  ggplot(aes(x = date, y = employment, color = occupation)) +
+  geom_line() +
+  labs(title = "Employment Trends by Occupation Over Time",
+       x = "Date", y = "Employment Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Identify occupations with lower employment counts for a separate, detailed plot
+max_employment_counts <- occupation_data_monthly %>%
+  summarise(across(-date, max, na.rm = TRUE))
+
+# Filter occupations with a maximum count below a specific threshold (e.g., 500,000)
+low_employment_occupations <- names(max_employment_counts)[max_employment_counts < 500000]
+low_employment_data <- occupation_data_monthly %>%
+  select(date, all_of(low_employment_occupations))
+
+# Plotting only the occupations with lower employment counts
+low_employment_data %>%
+  gather(key = "occupation", value = "employment", -date) %>%
+  filter(!is.na(employment)) %>%  # Remove rows with NA employment values
+  ggplot(aes(x = date, y = employment, color = occupation)) +
+  geom_line() +
+  labs(title = "Detailed View of Employment Trends for Smaller Occupations Over Time",
+       x = "Date", y = "Employment Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+# Filtering data to focus on a subset (e.g., top 10 occupations with highest employment counts)
+top_occupations <- low_employment_data %>%
+  summarise(across(-date, max, na.rm = TRUE)) %>%
+  gather(key = "occupation", value = "employment") %>%
+  arrange(desc(employment)) %>%
+  slice(1:10) %>%  # Select top 10 occupations
+  pull(occupation)
+
+low_employment_data_top <- low_employment_data %>%
+  select(date, all_of(top_occupations)) %>%
+  gather(key = "occupation", value = "employment", -date) %>%
+  filter(!is.na(employment))
+
+```
+
+```{r, time series}
+# Improved plot
+ggplot(low_employment_data_top, aes(x = date, y = employment, color = occupation)) +
+  geom_line(alpha = 0.7) +  # Make lines slightly transparent
+  labs(title = "Employment Trends for Selected Smaller Occupations Over Time",
+       x = "Date", y = "Employment Count") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8)  # Smaller legend text
+  ) +
+  scale_color_manual(values = colorRampPalette(brewer.pal(9, "Set1"))(10))  # Use a color palette for clearer distinctions
+
+```
+
+```{r, Regression, message=FALSE}
+data_regression <- Current_Employment_Statistics %>%
+  select(periodyear, periodname, indtitle, empces, earnings, hours) %>%
+  filter(!str_detect(periodname, "Year")) %>%
+  mutate(date = as.Date(paste(periodyear, periodname, "01", sep = "-"), format = "%Y-%b-%d")) %>%
+  mutate(across(c(empces, hours, earnings), ~na_if(., 999999))) %>%
+  mutate(across(c(empces, hours, earnings), ~na_if(., 0))) %>%
+  drop_na(date, empces, earnings, hours)
+
+top_occupations <- data_regression %>%
+  group_by(indtitle) %>%
+  summarize(total_empces = sum(empces, na.rm = TRUE)) %>%
+  arrange(desc(total_empces)) %>%
+  slice_head(n = 10)
+
+data_regression_top <- data_regression %>%
+  filter(indtitle %in% top_occupations$indtitle)
+
+ggplot(data_regression_top, aes(x = earnings, y = empces)) +
+  geom_point(alpha = 0.5, color = "dodgerblue3") +
+  geom_smooth(method = "lm", color = "darkred", size = 1) +
+  labs(title = "Regression of Employment per Earnings",
+       x = "Earnings",
+       y = "Employment") +
+  theme_light(base_size = 8) +
+  theme(
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.5),
+    panel.grid.minor = element_line(color = "gray95", linewidth = 0.25),
+    strip.text = element_text(face = "bold", size = 6),
+    axis.text = element_text(color = "black", size = 8),
+    axis.title = element_text(face = "bold", size = 14),
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5)
+  ) +
+  facet_wrap(~ indtitle)
+
+ggplot(data_regression_top, aes(x = hours, y = empces)) +
+  geom_point(alpha = 0.5, color = "dodgerblue3") +
+  geom_smooth(method = "lm", color = "darkred", size = 1) +
+  labs(title = "Regression of Employment per Hours Worked",
+       x = "Hours Worked",
+       y = "Employment") +
+  theme_light(base_size = 8) +
+  theme(
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.5),
+    panel.grid.minor = element_line(color = "gray95", linewidth = 0.25),
+    strip.text = element_text(face = "bold", size = 6),
+    axis.text = element_text(color = "black", size = 8),
+    axis.title = element_text(face = "bold", size = 14),
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5)
+  ) +
+  facet_wrap(~ indtitle)
+
+lm_model <- lm(empces ~ earnings + hours, data = data_regression_top)
+print(tidy(lm_model))
+```
+
+```{r, with aproximations}
+
+# Forecasting for the last 12 months for each of the top 10 occupations using auto.arima
+forecast_results_aprox = list()
+accuracy_results_aprox = list()
+for (occupation in unique(low_employment_data_top$occupation)) {
+  ts_data = ts(low_employment_data_top %>% filter(occupation == !!occupation) %>% pull(employment), frequency = 12, start = c(year(min(low_employment_data_top$date)), month(min(low_employment_data_top$date))))
+  
+  # Split the data into training and testing sets based on the date information
+  train_end_date = as.Date("2023-07-01")
+  test_start_date = train_end_date + months(1)
+  
+  train = window(ts_data, end = c(year(train_end_date), month(train_end_date)))
+  test = window(ts_data, start = c(year(test_start_date), month(test_start_date)))
+  
+  # Fit the ARIMA model on the training set using auto.arima
+  fit = auto.arima(train, stepwise = FALSE, approximation = TRUE, num.cores = 6)
+  
+  # Forecast the next 24 months
+  forecast = forecast(fit, h = 24)
+  forecast_12 = forecast$mean[1:12]
+  
+  # Calculate accuracy metrics based on the forecasted and test values
+  mse = mean((forecast_12 - test)^2)
+  mae = mean(abs(forecast_12 - test))
+  r2 = 1 - sum((forecast_12 - test)^2) / sum((test - mean(test))^2)
+  
+  # Store the forecast and accuracy results along with the model details
+  forecast_results_aprox[[occupation]] = list(forecast = forecast, train = train, test = test)
+  accuracy_results_aprox[[occupation]] = list(MSE = mse, MAE = mae, R2 = r2, Model = fit$arma)
+}
+
+```
+
+```{r, Forecast setup}
+# Convert the date column to Date type if it's not already
+low_employment_data_top$date = as.Date(low_employment_data_top$date)
+
+# Forecasting for the last 12 months for each of the top 10 occupations using auto.arima
+forecast_results = list()
+accuracy_results = list()
+for (occupation in unique(low_employment_data_top$occupation)) {
+  ts_data = ts(low_employment_data_top %>% filter(occupation == !!occupation) %>% pull(employment), frequency = 12, start = c(year(min(low_employment_data_top$date)), month(min(low_employment_data_top$date))))
+  
+  # Split the data into training and testing sets based on the date information
+  train_end_date = as.Date("2023-07-01")
+  test_start_date = train_end_date + months(1)
+  
+  train = window(ts_data, end = c(year(train_end_date), month(train_end_date)))
+  test = window(ts_data, start = c(year(test_start_date), month(test_start_date)))
+  
+  # Fit the ARIMA model on the training set using auto.arima
+  fit = auto.arima(train, stepwise = FALSE, approximation = FALSE, num.cores = 6)
+  
+  # Forecast the next 24 months
+  forecast = forecast(fit, h = 24)
+  forecast_12 = forecast$mean[1:12]
+  
+  # Calculate accuracy metrics based on the forecasted and test values
+  mse = mean((forecast_12 - test)^2)
+  mae = mean(abs(forecast_12 - test))
+  r2 = 1 - sum((forecast_12 - test)^2) / sum((test - mean(test))^2)
+  
+  # Store the forecast and accuracy results along with the model details
+  forecast_results[[occupation]] <- list(forecast = forecast, train = train, test = test)
+  accuracy_results[[occupation]] <- list(MSE = mse, MAE = mae, R2 = r2, Model = fit$arma)
+}
+
+# Define the cutoff date for training and test data
+cutoff_date = as.Date("2023-07-01")
+
+# Add a new column 'type' to label the data
+low_employment_data_top$type = ifelse(low_employment_data_top$date <= cutoff_date, "Train", "Test")
+```
+
+
+```{r, Forecast and plot prep}
+# Define the cutoff date for training and test data
+cutoff_date = as.Date("2023-07-01")
+
+# Add a new column 'type' to label the data
+low_employment_data_top$type = ifelse(low_employment_data_top$date <= cutoff_date, "Train", "Test")
+
+# Reorder the columns to date, value, type, occupation
+low_employment_data_top = low_employment_data_top[, c("date", "employment", "type", "occupation")]
+
+combined_forecast <- low_employment_data_top
+combined_forecast$lower <- NA
+combined_forecast$upper <- NA
+
+for (occupation in names(forecast_results)) {
+  forecast <- forecast_results[[occupation]]$forecast
+  
+  # Create the forecast dataframe
+  forecast_df <- data.frame(
+    date = seq.Date(from = as.Date("2023-08-01"), by = "month", length.out = length(forecast$mean)),
+    employment = as.numeric(forecast$mean),
+    lower = as.numeric(forecast$lower),
+    upper = as.numeric(forecast$upper),
+    type = "Forecast",
+    occupation = occupation
+  )
+  
+  combined_forecast <- rbind(combined_forecast, forecast_df)
+}
+
+combined_forecast_filtered = combined_forecast%>%
+  filter(combined_forecast$date>as.Date("2010-01-01"))
+low_employment_data_top_datefiltered = low_employment_data_top%>%
+  filter(low_employment_data_top$date>as.Date("2010-01-01"))
+
+
+# Add a new column to group occupations into sets of 5
+combined_forecast_filtered$group = as.factor((as.numeric(as.factor(combined_forecast_filtered$occupation)) - 1) %/% 5 + 1)
+low_employment_data_top_datefiltered$group = as.factor((as.numeric(as.factor(low_employment_data_top_datefiltered$occupation)) - 1) %/% 5 + 1)
+```
+
+```{r, plots and testing}
+# First Graph: Individual occupation graphs with the ribbon
+confidence_forecast_plot = ggplot() +
+  geom_line(data = low_employment_data_top_datefiltered, aes(x = date, y = employment, color = occupation)) +
+  geom_point(data = low_employment_data_top_datefiltered, aes(x = date, y = employment, color = occupation), size = 1) +
+  geom_ribbon(data = combined_forecast_filtered, aes(x = date, ymin = lower, ymax = upper, fill = occupation), alpha = 0.2) +
+  geom_line(data = combined_forecast_filtered, aes(x = date, y = employment, color = occupation), linetype = "dashed", size = 1.2, alpha = 0.8) +
+  ggtitle("Employment Forecasts for Top 10 Occupations") +
+  xlab("Date") + ylab("Employment Count") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  scale_x_date(limits = c(as.Date("2010-01-01"), as.Date("2026-01-01"))) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  facet_wrap(~ occupation, scales = "free_y")
+
+# Second Graph: Only the forecasted values
+all_plot_forecast = ggplot() +
+  geom_line(data = low_employment_data_top_datefiltered, aes(x = date, y = employment, color = occupation)) +
+  geom_point(data = combined_forecast_filtered %>% filter(type == "Forecast"), aes(x = date, y = employment, color = occupation), linetype = "dashed", size = 1, alpha = 0.7) +
+  ggtitle("Forecasted Employment Values for Top 10 Occupations") +
+  xlab("Date") + ylab("Employment Count") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  scale_x_date(limits = c(as.Date("2010-01-01"), as.Date("2026-01-01"))) +
+  scale_y_continuous(labels = scales::label_comma())
+
+#view and saving plots
+confidence_forecast_plot
+all_plot_forecast
+ggsave("confidence_forecast_plot.png", plot = confidence_forecast_plot, width = 12)
+ggsave("all_plot_forecast.png", plot = all_plot_forecast, width = 12)
+
+# Print accuracy results
+for (occupation in names(accuracy_results)) {
+  cat("Accuracy metrics with aprox on for arima for", occupation, ":\n")
+  cat("MSE aprox:", round(accuracy_results_aprox[[occupation]]$MSE, 2), "\n")
+  cat("MAE aprox:", round(accuracy_results_aprox[[occupation]]$MAE, 2), "\n")
+  cat("R² aprox:", round(accuracy_results_aprox[[occupation]]$R2, 2), "\n")
+  cat("Arima Model w/aprox:", accuracy_results_aprox[[occupation]]$Model, "\n")
+  cat("Accuracy metrics for arima non aprox for", occupation, ":\n")
+  cat("MSE:", round(accuracy_results[[occupation]]$MSE, 2), "\n")
+  cat("MAE:", round(accuracy_results[[occupation]]$MAE, 2), "\n")
+  cat("R²:", round(accuracy_results[[occupation]]$R2, 2), "\n")
+  cat("Arima Model:", accuracy_results[[occupation]]$Model, "\n\n")
+}
+
+```
